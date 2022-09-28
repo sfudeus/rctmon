@@ -133,3 +133,6 @@ tags
 [._]*.un~
 /attic
 *.pcap
+
+# IDEA
+.idea

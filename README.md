@@ -1,3 +1,9 @@
+This is a fork of https://github.com/svalouch/rctmon as the original project seemed a bit dead with a couple of open PRs.
+
+I also added the work of [@sfudeus](https://github.com/sfudeus/docker_rctmon) and included the Dockerfile from him.
+
+You can grab the image here `frooop/rctmon`
+
 # Metrics extractor for RCT Inverters
 
 Tool to extract metrics from a single solar inverter by RCT Power GmbH, using their proprietary Serial Communication
