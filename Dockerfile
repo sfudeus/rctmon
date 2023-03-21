@@ -1,5 +1,5 @@
 FROM python:3-alpine
-LABEL maintainer="Stephan Fudeus <github@mails.fudeus.net>"
+LABEL maintainer="Kai Timmer <kaitimmer@users.noreply.github.com>"
 
 RUN apk update && apk add git
 RUN pip3 install -U git+https://github.com/kaitimmer/rctmon
