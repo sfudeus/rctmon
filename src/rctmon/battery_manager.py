@@ -14,7 +14,7 @@ from typing import Any, Dict, Generator, Optional
 from influxdb_client import Point, WritePrecision as InfluxWritePrecision
 from prometheus_client.core import InfoMetricFamily, CounterMetricFamily, GaugeMetricFamily
 from rctclient.registry import REGISTRY as R
-from rctclient.types import BatteryModuleStatus
+from rctclient.types import BatteryModuleStatus, BatteryModuleStatistics
 
 from .influx import InfluxDB
 from .models import BatteryInfo, BatteryReadings
@@ -30,7 +30,8 @@ BAT_IDS_CYCLES = {0xA6C4FD4A: 0, 0xCFA8BC4: 1, 0x5BA122A5: 2, 0x89B25F4B: 3, 0x5
                   0x27C39CEA: 6}
 BAT_IDS_CELLS = {0xF8C0D255: 0, 0x8EF6FBBD: 1, 0x69B8FF28: 2, 0xC8609C8E: 3, 0x1348AB07: 4, 0x62D645D9: 5,
                  0x40FF01B7: 6}
-
+BAT_IDS_STATS = {0x34A164E7: 0, 0xFB796780: 1, 0x74FD4609: 2, 0x1676FA6: 3, 0xDACF21B: 4, 0x23E55DA0: 5,
+                 0xF99E8CC8: 6}
 
 class BatteryManager:
     '''
@@ -133,6 +134,18 @@ class BatteryManager:
             cell_voltages = GaugeMetricFamily(name='rctmon_battery_module_cell_voltage',
                                               documentation='Individual cell voltage in battery modules',
                                               labels=['inverter', 'module', 'cell'], unit='volt')
+            min_voltage = GaugeMetricFamily(name='rctmon_battery_module_voltage_min',
+                                              documentation='Historic minimum voltage in battery module',
+                                              labels=['inverter', 'module'], unit='volt')
+            max_voltage = GaugeMetricFamily(name='rctmon_battery_module_voltage_max',
+                                              documentation='Historic maximum voltage in battery module',
+                                              labels=['inverter', 'module'], unit='volt')
+            min_temperature = GaugeMetricFamily(name='rctmon_battery_module_temperature_min',
+                                              documentation='Historic minimum temperature in battery module',
+                                              labels=['inverter', 'module'], unit='celsius')
+            max_temperature = GaugeMetricFamily(name='rctmon_battery_module_temperature_max',
+                                              documentation='Historic maximum temperature in battery module',
+                                              labels=['inverter', 'module'], unit='celsius')
             for battery in self.batteries.values():
                 if battery:
                     yield InfoMetricFamily('rctmon_battery_module', 'Information about individual battery modules',
@@ -141,12 +154,24 @@ class BatteryManager:
 
                     if battery.cycle_count is not None:
                         cycles.add_metric([self.parent.name, str(battery.num)], battery.cycle_count)
+                    if battery.min_voltage is not None:
+                        min_voltage.add_metric([self.parent.name, str(battery.num)], battery.min_voltage)
+                    if battery.max_voltage is not None:
+                        max_voltage.add_metric([self.parent.name, str(battery.num)], battery.max_voltage)
+                    if battery.min_temperature is not None:
+                        min_temperature.add_metric([self.parent.name, str(battery.num)], battery.min_temperature)
+                    if battery.max_temperature is not None:
+                        max_temperature.add_metric([self.parent.name, str(battery.num)], battery.max_temperature)
                     if len(battery.cells)>0:
                         for cell_id, cell in battery.cells.items():
                             cell_temperatures.add_metric([self.parent.name, str(battery.num), str(cell_id)], cell.temperature)
                             cell_voltages.add_metric([self.parent.name, str(battery.num), str(cell_id)], cell.voltage)
             yield cell_temperatures
             yield cell_voltages
+            yield min_voltage
+            yield max_voltage
+            yield min_temperature
+            yield max_temperature
             yield cycles
 
     def collect_influx(self, influx: InfluxDB) -> None:
@@ -202,6 +227,7 @@ class BatteryManager:
             influx.add_points(modules.values())
 
             # TODO: cell temperatures and voltages
+            # TODO: historic min/max temperatures/voltages
 
     def cb_battery_type(self, oid: int, value: Any) -> None:
         '''
@@ -270,6 +296,8 @@ class BatteryManager:
                 self.parent.add_ids([f'battery.stack_cycles[{bat_id}]'], interval=300, handler=self._cb_battery_cycles)
                 # request temperatures/voltages per cell
                 self.parent.add_ids([f'battery.cells[{bat_id}]'], interval=300, handler=self._cb_battery_cells)
+                # request historic min/max temperatures/voltages
+                self.parent.add_ids([f'battery.cells_stat[{bat_id}]'], interval=300, handler=self._cb_battery_cells_stats)
 
     def _cb_battery_cycles(self, oid: int, value: Any) -> None:
         '''
@@ -300,6 +328,26 @@ class BatteryManager:
                 self.batteries[bat_id].populate_cells_from_status(value)
             except KeyError:
                 log.warning('BatteryManager: Attempt to set cell data for unknown battery #%d', bat_id)
+            except TypeError as e:
+                log.warning('Got wrong type %s for %s', type(value), R.get_by_id(oid).name)
+                log.warning(str(e))
+
+    def _cb_battery_cells_stats(self, oid: int, value: BatteryModuleStatistics) -> None:
+        '''
+        Handler for ``battery.cells_stat[X]``.
+        '''
+        try:
+            bat_id = BAT_IDS_STATS[oid]
+        except KeyError:
+            log.error('battery.cells_stat: Got unknown OID 0x%X', oid)
+        else:
+            try:
+                self.batteries[bat_id].min_voltage = ensure_type(value.u_min.value, float)
+                self.batteries[bat_id].max_voltage = ensure_type(value.u_max.value, float)
+                self.batteries[bat_id].min_temperature = ensure_type(value.t_min.value, float)
+                self.batteries[bat_id].max_temperature = ensure_type(value.t_max.value, float)
+            except KeyError:
+                log.warning('BatteryManager: Attempt to set statistics data for unknown battery #%d', bat_id)
             except TypeError as e:
                 log.warning('Got wrong type %s for %s', type(value), R.get_by_id(oid).name)
                 log.warning(str(e))
