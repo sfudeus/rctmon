@@ -14,6 +14,7 @@ from typing import Any, Dict, Generator, Optional
 from influxdb_client import Point, WritePrecision as InfluxWritePrecision
 from prometheus_client.core import InfoMetricFamily, CounterMetricFamily, GaugeMetricFamily
 from rctclient.registry import REGISTRY as R
+from rctclient.types import BatteryModuleStatus
 
 from .influx import InfluxDB
 from .models import BatteryInfo, BatteryReadings
@@ -27,6 +28,8 @@ BAT_IDS_MODULE_SN = {0xFBF6D834: 0, 0x99396810: 1, 0x73489528: 2, 0x257B7612: 3,
                      0x5939EC5D: 6}
 BAT_IDS_CYCLES = {0xA6C4FD4A: 0, 0xCFA8BC4: 1, 0x5BA122A5: 2, 0x89B25F4B: 3, 0x5A9EEFF0: 4, 0x2A30A97E: 5,
                   0x27C39CEA: 6}
+BAT_IDS_CELLS = {0xF8C0D255: 0, 0x8EF6FBBD: 1, 0x69B8FF28: 2, 0xC8609C8E: 3, 0x1348AB07: 4, 0x62D645D9: 5,
+                 0x40FF01B7: 6}
 
 
 class BatteryManager:
@@ -37,7 +40,6 @@ class BatteryManager:
     have_battery: Optional[bool] = None
 
     # Number of battery modules, None if not yet known
-    num_batteries: Optional[int] = None
     batteries: Dict[int, BatteryInfo]
 
     readings: BatteryReadings
@@ -121,9 +123,16 @@ class BatteryManager:
             battery_used_energy.add_metric([self.parent.name], self.readings.used_energy)
             yield battery_used_energy
 
-        if self.num_batteries and self.num_batteries > 0:
-            cycles = CounterMetricFamily('rctmon_battery_module_cycles', 'Number of cycles the battery has accumulated'
-                                         ' over its lifetime', labels=['inverter', 'module'])
+        if len(self.batteries) > 0:
+            cycles = CounterMetricFamily(name='rctmon_battery_module_cycles',
+                                         documentation='Number of cycles the battery has accumulated over its lifetime',
+                                         labels=['inverter', 'module'])
+            cell_temperatures = GaugeMetricFamily(name='rctmon_battery_module_cell_temperature',
+                                                  documentation='Individual cell temperature in battery modules',
+                                                  labels=['inverter', 'module', 'cell'], unit='celsius')
+            cell_voltages = GaugeMetricFamily(name='rctmon_battery_module_cell_voltage',
+                                              documentation='Individual cell voltage in battery modules',
+                                              labels=['inverter', 'module', 'cell'], unit='volt')
             for battery in self.batteries.values():
                 if battery:
                     yield InfoMetricFamily('rctmon_battery_module', 'Information about individual battery modules',
@@ -132,6 +141,12 @@ class BatteryManager:
 
                     if battery.cycle_count is not None:
                         cycles.add_metric([self.parent.name, str(battery.num)], battery.cycle_count)
+                    if len(battery.cells)>0:
+                        for cell_id, cell in battery.cells.items():
+                            cell_temperatures.add_metric([self.parent.name, str(battery.num), str(cell_id)], cell.temperature)
+                            cell_voltages.add_metric([self.parent.name, str(battery.num), str(cell_id)], cell.voltage)
+            yield cell_temperatures
+            yield cell_voltages
             yield cycles
 
     def collect_influx(self, influx: InfluxDB) -> None:
@@ -185,6 +200,8 @@ class BatteryManager:
                         modules[battery.num] = modules[battery.num].field('cycles', battery.cycle_count)
 
             influx.add_points(modules.values())
+
+            # TODO: cell temperatures and voltages
 
     def cb_battery_type(self, oid: int, value: Any) -> None:
         '''
@@ -251,6 +268,8 @@ class BatteryManager:
                 self.batteries[bat_id] = BatteryInfo(bat_id, value)
                 # request the modules cycle count from now on
                 self.parent.add_ids([f'battery.stack_cycles[{bat_id}]'], interval=300, handler=self._cb_battery_cycles)
+                # request temperatures/voltages per cell
+                self.parent.add_ids([f'battery.cells[{bat_id}]'], interval=300, handler=self._cb_battery_cells)
 
     def _cb_battery_cycles(self, oid: int, value: Any) -> None:
         '''
@@ -267,6 +286,23 @@ class BatteryManager:
                 log.warning('BatteryManager: Attempt to set cycle count for unknown battery #%d', bat_id)
             except TypeError:
                 log.warning('Got wrong type %s for %s', type(value), R.get_by_id(oid).name)
+
+    def _cb_battery_cells(self, oid: int, value: BatteryModuleStatus) -> None:
+        '''
+        Handler for ``battery.cells[X]``.
+        '''
+        try:
+            bat_id = BAT_IDS_CELLS[oid]
+        except KeyError:
+            log.error('battery.cells: Got unknown OID 0x%X', oid)
+        else:
+            try:
+                self.batteries[bat_id].populate_cells_from_status(value)
+            except KeyError:
+                log.warning('BatteryManager: Attempt to set cell data for unknown battery #%d', bat_id)
+            except TypeError as e:
+                log.warning('Got wrong type %s for %s', type(value), R.get_by_id(oid).name)
+                log.warning(str(e))
 
     def _cb_readings(self, oid: int, value: Any) -> None:
         try:

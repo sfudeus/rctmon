@@ -12,9 +12,25 @@ from dataclasses import dataclass
 from typing import Generator, Optional
 
 from prometheus_client.core import GaugeMetricFamily, InfoMetricFamily
+from rctclient.types import BatteryModuleStatus
+
 from .event_processor import EventBroadcaster, Event
 
 log = logging.getLogger(__name__)
+
+class CellInfo:
+    '''
+    Information about a single cell in a battery.
+    '''
+    voltage: float
+    temperature: float
+
+    def __init__(self, voltage: float, temperature: float) -> None:
+        self.voltage = voltage
+        self.temperature = temperature
+
+    def __repr__(self) -> str:
+        return f'<CellInfo("{self.voltage}V", "{self.temperature}°C")>'
 
 
 class BatteryInfo:
@@ -25,10 +41,12 @@ class BatteryInfo:
     num: int
     serial: str
     cycle_count: Optional[int] = None
+    cells: dict[int, CellInfo] = {}
 
     def __init__(self, num: int, serial: str) -> None:
         self.num = num
         self.serial = serial
+        self.cells = {}
 
     def __repr__(self) -> str:
         return f'<BatteryInfo({self.num}, "{self.serial}")>'
@@ -38,6 +56,13 @@ class BatteryInfo:
         Returns whether the information is complete.
         '''
         return self.cycle_count is not None
+
+    def populate_cells_from_status(self, status: BatteryModuleStatus) -> None:
+        '''
+        Populates ``cells`` from a decoded ``BatteryModuleStatus`` payload.
+        '''
+        self.cells = {cell_id: CellInfo(voltage=cell.voltage_v, temperature=int(cell.temperature_c))
+                      for cell_id, cell in status.cells.items()}
 
 class AbstractReadings:
 
