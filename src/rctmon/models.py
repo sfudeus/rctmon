@@ -42,6 +42,10 @@ class BatteryInfo:
     serial: str
     cycle_count: Optional[int] = None
     cells: dict[int, CellInfo] = {}
+    min_voltage: Optional[float] = None
+    max_voltage: Optional[float] = None
+    min_temperature: Optional[float] = None
+    max_temperature: Optional[float] = None
 
     def __init__(self, num: int, serial: str) -> None:
         self.num = num
