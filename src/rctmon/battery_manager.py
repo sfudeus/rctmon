@@ -8,13 +8,14 @@ Depending on the available batteries, it requests values from the device via the
 '''
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, Optional
 
 from influxdb_client import Point, WritePrecision as InfluxWritePrecision
 from prometheus_client.core import InfoMetricFamily, CounterMetricFamily, GaugeMetricFamily
 from rctclient.registry import REGISTRY as R
-from rctclient.types import BatteryModuleStatus, BatteryModuleStatistics
+from rctclient.types import BatteryModuleResistance, BatteryModuleStatus, BatteryModuleStatistics
 
 from .influx import InfluxDB
 from .models import BatteryInfo, BatteryReadings
@@ -134,6 +135,9 @@ class BatteryManager:
             cell_voltages = GaugeMetricFamily(name='rctmon_battery_module_cell_voltage',
                                               documentation='Individual cell voltage in battery modules',
                                               labels=['inverter', 'module', 'cell'], unit='volt')
+            cell_resistances = GaugeMetricFamily(name='rctmon_battery_module_cell_resistance',
+                                                 documentation='Individual cell resistance in battery modules',
+                                                 labels=['inverter', 'module', 'cell'], unit='ohm')
             min_voltage = GaugeMetricFamily(name='rctmon_battery_module_voltage_min',
                                               documentation='Historic minimum voltage in battery module',
                                               labels=['inverter', 'module'], unit='volt')
@@ -166,8 +170,10 @@ class BatteryManager:
                         for cell_id, cell in battery.cells.items():
                             cell_temperatures.add_metric([self.parent.name, str(battery.num), str(cell_id)], cell.temperature)
                             cell_voltages.add_metric([self.parent.name, str(battery.num), str(cell_id)], cell.voltage)
+                            cell_resistances.add_metric([self.parent.name, str(battery.num), str(cell_id)], cell.resistance_ohm)
             yield cell_temperatures
             yield cell_voltages
+            yield cell_resistances
             yield min_voltage
             yield max_voltage
             yield min_temperature
@@ -295,7 +301,9 @@ class BatteryManager:
                 # request the modules cycle count from now on
                 self.parent.add_ids([f'battery.stack_cycles[{bat_id}]'], interval=300, handler=self._cb_battery_cycles)
                 # request temperatures/voltages per cell
-                self.parent.add_ids([f'battery.cells[{bat_id}]'], interval=300, handler=self._cb_battery_cells)
+                self.parent.add_ids([f'battery.cells[{bat_id}]'], interval=60, handler=self._cb_battery_cells)
+                # request per-cell resistances
+                self.parent.add_ids([f'battery.cells_resist[{bat_id}]'], interval=60, handler=self._cb_battery_cells_resistance)
                 # request historic min/max temperatures/voltages
                 self.parent.add_ids([f'battery.cells_stat[{bat_id}]'], interval=300, handler=self._cb_battery_cells_stats)
 
@@ -348,6 +356,27 @@ class BatteryManager:
                 self.batteries[bat_id].max_temperature = ensure_type(value.t_max.value, float)
             except KeyError:
                 log.warning('BatteryManager: Attempt to set statistics data for unknown battery #%d', bat_id)
+            except TypeError as e:
+                log.warning('Got wrong type %s for %s', type(value), R.get_by_id(oid).name)
+                log.warning(str(e))
+
+    def _cb_battery_cells_resistance(self, oid: int, value: BatteryModuleResistance) -> None:
+        '''
+        Handler for ``battery.cells_resist[X]``.
+        '''
+        try:
+            name = R.get_by_id(oid).name
+            match = re.search(r'cells_resist\[(\d+)\]', name)
+            if match is None:
+                raise ValueError(f'Could not parse module id from {name}')
+            bat_id = int(match.group(1))
+        except (KeyError, ValueError):
+            log.error('battery.cells_resist: Got unknown OID 0x%X', oid)
+        else:
+            try:
+                self.batteries[bat_id].populate_cells_resistance_from_status(value)
+            except KeyError:
+                log.warning('BatteryManager: Attempt to set cell resistance data for unknown battery #%d', bat_id)
             except TypeError as e:
                 log.warning('Got wrong type %s for %s', type(value), R.get_by_id(oid).name)
                 log.warning(str(e))
